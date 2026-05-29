@@ -23,16 +23,16 @@ Args:
   --target-addr ADDR    # default: 00:00:fe
   --cfg FILE            # register config JSON (same as cdbus_gui/configs/cdfoc-v7.json)
   --mode MODE           # 'pos', 'speed' (sine), or 'tp' (constant RPM), default: pos
-  --amplitude VAL       # sine: amplitude (encoder counts for pos, speed for speed)
-  --freq VAL            # sine: frequency in Hz, default: 0.5
+  --amplitude VAL       # sine amplitude (encoder counts for pos, speed for speed)
+  --freq VAL            # sine frequency in Hz, default: 0.5
   --duration SEC        # run duration in seconds, default: 10.0 (0 = run forever)
-  --rate HZ             # sine: target update rate in Hz, default: 100
+  --rate HZ             # sine update rate in Hz, default: 100
   --kp VAL              # pid_speed_kp (speed) or pid_pos.kp (pos/tp)
   --ki VAL              # pid_speed_ki (speed) or pid_pos.ki (pos/tp)
-  --rpm RPM             # speed/tp mode: target speed in RPM (float)
-  --dir {cw,ccw}        # speed/tp mode: rotation direction, default: cw
-  --tp-speed VAL        # tp mode: override tp_speed (raw units)
-  --tp-accel VAL        # tp mode: override tp_accel (raw units)
+  --rpm RPM             # tp mode: target speed in RPM (float)
+  --dir {cw,ccw}        # tp mode: rotation direction, default: cw
+  --tp-speed VAL        # tp_speed override (raw units, default: auto from rpm)
+  --tp-accel VAL        # tp_accel override (raw units, default: auto from rpm)
   --keep-running        # do not stop motor on exit
 """
 
@@ -138,7 +138,7 @@ def build_parser():
         ),
     )
     parser.add_argument("--mode", choices=["pos", "speed", "tp"], default="pos",
-                        help="'pos': sine position; 'speed': sine/const-speed; 'tp': const-RPM (state=5)")
+                        help="'pos'/'speed': sine wave; 'tp': constant RPM rotation (state=5)")
     parser.add_argument("--amplitude", type=float, default=10000.0,
                         help="sine: amplitude (encoder counts for pos, speed value for speed)")
     parser.add_argument("--freq", type=float, default=0.5,
@@ -152,9 +152,9 @@ def build_parser():
     parser.add_argument("--ki", type=float, default=None,
                         help="pid_speed_ki (speed) or pid_pos.ki (pos/tp)")
     parser.add_argument("--rpm", type=float, default=None,
-                        help="speed/tp: target speed in RPM (float)")
+                        help="tp mode: target speed in RPM (float)")
     parser.add_argument("--dir", choices=["cw", "ccw"], default="cw",
-                        help="speed/tp: rotation direction, default: cw")
+                        help="tp mode: rotation direction, default: cw")
     parser.add_argument("--tp-speed", type=int, default=None,
                         help="tp mode: override tp_speed (raw units)")
     parser.add_argument("--tp-accel", type=int, default=None,
@@ -179,24 +179,26 @@ def main():
         reg_db=reg_db,
     )
 
-    # --- Constants ---
-    ENC_CPR = 65536  # 16-bit encoder counts per revolution
+    print(f"connected: dev={args.dev}, baud={baud}, target={args.target_addr}")
+    print(f"mode={args.mode}, amplitude={args.amplitude}, freq={args.freq} Hz, "
+          f"update_rate={args.rate} Hz")
 
-    # --- Determine if constant-rpm mode ---
-    is_const_rpm = (args.mode in ("speed", "tp")) and args.rpm is not None
-    if args.mode == "tp" and args.rpm is None:
-        print("error: --rpm is required in tp mode")
-        sys.exit(1)
-
-    # --- Print startup info ---
-    if is_const_rpm:
-        print(f"connected: dev={args.dev}, baud={baud}, target={args.target_addr}")
-        print(f"mode={args.mode} (constant rpm), rpm={args.rpm}, dir={args.dir}, "
-              f"duration={args.duration}s")
-    else:
-        print(f"connected: dev={args.dev}, baud={baud}, target={args.target_addr}")
-        print(f"mode={args.mode}, amplitude={args.amplitude}, freq={args.freq} Hz, "
-              f"update_rate={args.rate} Hz")
+    # --- Check if tp mode is suitable for the requested parameters ---
+    if args.mode == "tp":
+        # tp planner limits (default firmware values)
+        tp_accel_dft = 65536 * 5
+        tp_speed_dft = 65536 * 20
+        acc_need = abs(args.amplitude) * (2 * math.pi * args.freq) ** 2
+        vel_need = abs(args.amplitude) * 2 * math.pi * args.freq
+        acc_ok = args.tp_accel is not None and args.tp_accel >= acc_need
+        speed_ok = args.tp_speed is not None and args.tp_speed >= vel_need
+        if not acc_ok and acc_need > tp_accel_dft:
+            print(f"⚠️  tp mode warning: required acceleration {acc_need:.0f} >> "
+                  f"default tp_accel {tp_accel_dft}")
+            print(f"   The trap planner cannot track this sine wave. Use --mode pos instead.")
+        if not speed_ok and vel_need > tp_speed_dft:
+            print(f"⚠️  tp mode warning: required velocity {vel_need:.0f} > "
+                  f"default tp_speed {tp_speed_dft}")
 
     # --- Determine mode-specific settings ---
     if args.mode in ("pos", "tp"):
@@ -227,26 +229,14 @@ def main():
             except KeyError:
                 continue
 
-    # --- Constant-rpm: convert RPM → encoder counts / sec ---
-    rpm_cps = 0.0  # encoder counts per second
-    if is_const_rpm:
-        rpm_cps = abs(args.rpm) * ENC_CPR / 60.0
-
-    # --- Configure trap planner (tp mode) ---
+    # --- Configure trap planner (tp mode only) ---
     if args.mode == "tp":
-        speed_raw = int(rpm_cps)
-        accel_raw = int(speed_raw * 5)
-
-        tp_speed_val = args.tp_speed if args.tp_speed is not None else speed_raw
-        tp_accel_val = args.tp_accel if args.tp_accel is not None else accel_raw
-
-        tp_speed_val = max(1, min(tp_speed_val, 0xFFFFFFFF))
-        tp_accel_val = max(1, min(tp_accel_val, 0xFFFFFFFF))
-
-        ctrl.write_reg("tp_speed", tp_speed_val)
-        ctrl.write_reg("tp_accel", tp_accel_val)
-        print(f"tp_speed <- {tp_speed_val} ({args.rpm} rpm → {speed_raw} cnt/s)")
-        print(f"tp_accel <- {tp_accel_val}")
+        if args.tp_speed is not None:
+            ctrl.write_reg("tp_speed", args.tp_speed)
+            print(f"tp_speed <- {args.tp_speed}")
+        if args.tp_accel is not None:
+            ctrl.write_reg("tp_accel", args.tp_accel)
+            print(f"tp_accel <- {args.tp_accel}")
 
     # Read the current position as a baseline offset
     pos_offset = 0
@@ -265,69 +255,7 @@ def main():
 
     print(f"motor started, state={state_target} ({args.mode} mode)")
 
-    # --- Constant-RPM main loop (speed or tp mode) ---
-    if is_const_rpm:
-        ctrl_period = 0.05  # 20 Hz
-        dir_sign = 1 if args.dir == "cw" else -1
-        target_speed = rpm_cps * dir_sign  # signed cnt/s
-        t_start = time.time()
-
-        if args.mode == "speed":
-            # Speed mode: write cal_speed directly
-            ctrl.write_reg("cal_speed", target_speed, retry=3)
-
-        try:
-            while True:
-                loop_start = time.time()
-                t = time.time() - t_start
-
-                if args.duration > 0 and t >= args.duration:
-                    print(f"\nduration {args.duration}s reached")
-                    break
-
-                if args.mode == "tp":
-                    # Extend tp_pos ahead of current position
-                    cal_pos = ctrl.read_reg("cal_pos", retry=1)
-                    extend = int(ENC_CPR * 10 * dir_sign)
-                    target_pos = cal_pos + extend
-                    ctrl.write_reg("tp_pos", target_pos, retry=1)
-
-                # Read back speed / rpm
-                try:
-                    sen_speed = ctrl.read_reg("sen_speed", retry=1)
-                    sen_rpm = ctrl.read_reg("sen_rpm_avg", retry=1)
-                    if args.mode == "tp":
-                        print(f"t={t:.3f}\ttgt_rpm={args.rpm:>8.1f}\t"
-                              f"speed={sen_speed:>8.1f}\trpm={sen_rpm:>8.1f}")
-                    else:
-                        print(f"t={t:.3f}\ttgt_rpm={args.rpm:>8.1f}\t"
-                              f"speed={sen_speed:>8.1f}\trpm={sen_rpm:>8.1f}")
-                except Exception:
-                    pass
-
-                elapsed = time.time() - loop_start
-                sleep_time = ctrl_period - elapsed
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-
-        except KeyboardInterrupt:
-            print("\nkeyboard interrupted")
-
-        finally:
-            if not args.keep_running:
-                try:
-                    if args.mode == "speed":
-                        ctrl.write_reg("cal_speed", 0.0)
-                    else:
-                        ctrl.write_reg("tp_pos", cal_pos if 'cal_pos' in dir() else 0)
-                    ctrl.write_reg("state", 0)
-                    print("exit cleanup: motor stopped")
-                except Exception as e:
-                    print(f"exit cleanup warning: {e}")
-            ctrl.close()
-        return
-
-    # --- Sine wave loop (pos / speed modes) ---
+    # --- Sine wave loop ---
     period = 1.0 / args.rate
     t_start = time.time()
 
@@ -344,6 +272,10 @@ def main():
             if args.mode == "speed":
                 target = args.amplitude * math.sin(2 * math.pi * args.freq * t)
                 ctrl.write_reg("cal_speed", target, retry=1)
+            elif args.mode == "tp":
+                # tp_pos is in same unit as cal_pos (encoder counts)
+                target = int(args.amplitude * math.sin(2 * math.pi * args.freq * t)) + pos_offset
+                ctrl.write_reg("tp_pos", target, retry=1)
             else:  # pos
                 target = int(args.amplitude * math.sin(2 * math.pi * args.freq * t)) + pos_offset
                 ctrl.write_reg("cal_pos", target, retry=1)
@@ -370,6 +302,8 @@ def main():
             try:
                 if args.mode == "speed":
                     ctrl.write_reg("cal_speed", 0.0)
+                elif args.mode == "tp":
+                    ctrl.write_reg("tp_pos", pos_offset)
                 else:
                     ctrl.write_reg("cal_pos", pos_offset)
                 ctrl.write_reg("state", 0)
