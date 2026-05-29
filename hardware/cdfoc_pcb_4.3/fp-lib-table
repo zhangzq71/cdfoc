@@ -1,0 +1,4 @@
+(fp_lib_table
+  (lib (name common)(type KiCad)(uri ${KIPRJMOD}/pcb_library/modules/common.pretty)(options "")(descr ""))
+  (lib (name uncommon)(type KiCad)(uri ${KIPRJMOD}/pcb_library/modules/uncommon.pretty)(options "")(descr ""))
+)

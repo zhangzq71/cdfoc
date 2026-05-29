@@ -1,0 +1,5 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "common")(type "KiCad")(uri "${KIPRJMOD}/pcb_library/library/common.kicad_sym")(options "")(descr ""))
+  (lib (name "uncommon")(type "KiCad")(uri "${KIPRJMOD}/pcb_library/library/uncommon.kicad_sym")(options "")(descr ""))
+)

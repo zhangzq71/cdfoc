@@ -1,0 +1,3 @@
+[submodule "pcb_library"]
+	path = pcb_library
+	url = ../../pcb_library.git
