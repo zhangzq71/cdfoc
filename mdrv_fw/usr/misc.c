@@ -68,7 +68,7 @@ void cali_elec_angle(void)
     static int pole_cnt = -1;
     static int sub_cnt;
     static uint32_t t_last;
-    static uint16_t a90, a270;
+    static uint16_t a0, a90, a270;
     static int amount_f, amount_r;
     static int dir = 1; // -1 or +1
     static int32_t a_first;
@@ -84,11 +84,15 @@ void cali_elec_angle(void)
             state_w_hook_before(0, 1, &dat);
             csa.state = ST_VOLTAGE;
         }
-        csa.tgt_elec_angle = 0;
-        csa.tgt_vd = 0;
-        csa.tgt_vq = csa.cali_voltage;
+        // vd pulls the rotor d-axis onto tgt_elec_angle, so the a0 sample of
+        // each pole is the encoder zero; park at 270° first (sub_cnt -1), so
+        // that the first a0 is approached cw like all the others
+        csa.tgt_elec_angle = 0x10000 / 4 * 3;
+        csa.tgt_vd = csa.cali_voltage;
+        csa.tgt_vq = 0;
         t_last = get_systick();
-        pole_cnt = sub_cnt = 0;
+        pole_cnt = 0;
+        sub_cnt = -1;
         amount_f = amount_r = 0;
         dir = 1;
         a_first = -1;
@@ -101,20 +105,20 @@ void cali_elec_angle(void)
         return;
     t_last = t_cur;
 
-    d_debug("cali [%d, %d]", pole_cnt, sub_cnt);
-
-    if (sub_cnt == 0) {
-        d_debug_c(" - a0:   %04x\n", csa.nob_encoder);
-    } else if (sub_cnt == 1) {
-        a90 = csa.nob_encoder;
-        d_debug_c(" - a90:  %04x\n", a90);
-    } else if (sub_cnt == 2) {
-        d_debug_c(" - a180: %04x\n", csa.nob_encoder);
-    } else if (sub_cnt == 3) {
-        a270 = csa.nob_encoder;
-        d_debug_c(" - a270: %04x\n", a270);
-    } else {
-        d_debug_c("\n");
+    if (sub_cnt >= 0) {
+        d_debug("cali [%d, %d]", pole_cnt, sub_cnt);
+        if (sub_cnt == 0) {
+            a0 = csa.nob_encoder;
+            d_debug_c(" - a0:   %04x\n", a0);
+        } else if (sub_cnt == 1) {
+            a90 = csa.nob_encoder;
+            d_debug_c(" - a90:  %04x\n", a90);
+        } else if (sub_cnt == 2) {
+            d_debug_c(" - a180: %04x\n", csa.nob_encoder);
+        } else {
+            a270 = csa.nob_encoder;
+            d_debug_c(" - a270: %04x\n", a270);
+        }
     }
 
     if ((dir == 1 && sub_cnt == 3) || (dir == -1 && sub_cnt == 0)) {
@@ -126,14 +130,13 @@ void cali_elec_angle(void)
                 d_info("cali: wrong direction, toggle motor_wire_swap...\n");
                 return;
             }
-            a_first = a_shift = a270;
+            a_first = a0;
             float poles = (float)0x10000 / ((int16_t)(a270 - a90) * 2);
             csa.motor_poles = lroundf(poles);
             d_info("cali: update to motor_poles: %d (%d.%.2d)\n", csa.motor_poles, P_2F(poles));
-        } else {
-            a_shift = a270 - (pole_cnt * 0x10000 / csa.motor_poles);
         }
-        d_info("cali: a270: %04x, a_shift: %04x\n", a270, a_shift);
+        a_shift = a0 - (pole_cnt * 0x10000 / csa.motor_poles);
+        d_info("cali: a0: %04x, a_shift: %04x\n", a0, a_shift);
         d_info("cali: ----------------\n");
         int16_t delta_a = a_shift - a_first;
         if (dir == 1)
